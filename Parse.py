@@ -6,9 +6,10 @@ Requirements: pip install pdfplumber pymupdf "unstructured[pdf]
 """
 from pathlib import Path
 
-import fitz     #PyMuPDF
+import pymupdf  
 import pdfplumber
 from unstructured.partition.pdf import partition_pdf
+
 
 DEFAULT_STRATEGY = "hi-res"     #falls back to "fast" if hi_res fails
 
@@ -30,8 +31,8 @@ def save_single_page(pdf_path, page_idx, out_path):
     Extract one page into its own PDF, so Unstructured doesn't
     have to process the whole filing
     """
-    src = fitz.open(pdf_path)
-    dst = fitz.open()
+    src = pymupdf.open(pdf_path)
+    dst = pymupdf.open()
     dst.insert_pdf(src, from_page=page_idx, to_page=page_idx)
     dst.save(str(out_path))
 
