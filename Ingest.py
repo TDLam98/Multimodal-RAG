@@ -1,30 +1,36 @@
 """
-EDGAR ingestion.
+EDGAR ingestion: download recent 10-K filings for the tickers in tickers.txt.
 
-Run this file directly to bulk-download recent 10-K filings for a list of tickers:
-    python ingest.py
+Run (from the project folder):
+    python ingest.py               # every ticker in tickers.txt
+    python ingest.py --limit 10    # only the first 10 tickers (good for a pilot run)
 
 Outputs
     <DATA_DIR>/html/<TICKER>_<report_date>.html   one file per filing
-    <DATA_DIR>/manifest.csv                        what was downloaded (for later steps)
+    <DATA_DIR>/manifest.csv                        the filings covered by THIS run
     <DATA_DIR>/failures.csv                        anything that failed, and why
 
 Safe to re-run: files that already exist are skipped, so a crash or a
-rate-limit block never means starting over.
+rate-limit block never means starting over. Note that manifest.csv describes
+the run that just finished, so a --limit run writes a short manifest; run
+again without --limit to cover everything.
+
+Other scripts import DATA_DIR from this file, so the data location is set here once.
 
 Requires: pip install requests
 """
+import argparse
 import csv
 import time
 from pathlib import Path
 
 import requests
 
-# ------------------------- CONFIG -------------------------------------
-USER_AGENT = "Tan-Dat Lam txl7064@mavs.uta.edu"  # SEC requires this on every request
-TICKERS = Path(__file__).resolve().parent / "tickers.txt"   #pulls from list generated from ticker_list
-FILINGS_PER_COMPANY = 2                                     
-DATA_DIR = DATA_DIR = Path(__file__).resolve().parent / "data"
+# ------------------------- CONFIG: edit these -------------------------
+USER_AGENT = "Tan-Dat Lam txl7064@mavs.uta.edu"      # SEC requires this on every request
+FILINGS_PER_COMPANY = 2                              # ~130 tickers x 2 = ~260 filings
+TICKERS_FILE = Path(__file__).resolve().parent / "tickers.txt"   # made by ticker_list.py
+DATA_DIR = Path(__file__).resolve().parent / "data"              # inside the project folder
 # ----------------------------------------------------------------------
 
 HEADERS = {"User-Agent": USER_AGENT}
@@ -37,7 +43,15 @@ def sec_get(url):
     return r
 
 
-# ---------- Bulk download ----------
+def load_tickers(path=TICKERS_FILE):
+    """Read tickers.txt: one ticker per line; blank lines and # comments are ignored."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found. Run make_ticker_list.py first.")
+    lines = path.read_text().splitlines()
+    return [l.strip().upper() for l in lines if l.strip() and not l.startswith("#")]
+
+
 def load_ticker_map():
     """Download SEC's ticker->CIK table once, instead of once per ticker."""
     data = sec_get("https://www.sec.gov/files/company_tickers.json").json()
@@ -70,11 +84,13 @@ def write_csv(path, rows, fieldnames):
         writer.writeheader()
         writer.writerows(rows)
 
-def load_tickers(path=TICKERS_FILE):
-    lines = Path(path).read_text().splitlines()
-    return [l.strip().upper() for l in lines if l.strip() and not l.startswith("#")]
 
-def download_all(tickers=None, per_company=FILINGS_PER_COMPANY, data_dir=DATA_DIR):
+def download_all(tickers=None, per_company=FILINGS_PER_COMPANY, data_dir=DATA_DIR, limit=None):
+    if tickers is None:
+        tickers = load_tickers()
+    if limit:
+        tickers = tickers[:limit]
+
     data_dir = Path(data_dir)
     html_dir = data_dir / "html"
     html_dir.mkdir(parents=True, exist_ok=True)
@@ -121,4 +137,7 @@ def download_all(tickers=None, per_company=FILINGS_PER_COMPANY, data_dir=DATA_DI
 
 
 if __name__ == "__main__":
-    download_all()
+    ap = argparse.ArgumentParser(description="Download recent 10-K filings from SEC EDGAR.")
+    ap.add_argument("--limit", type=int, help="only process the first N tickers in tickers.txt")
+    args = ap.parse_args()
+    download_all(limit=args.limit)
