@@ -1,0 +1,2 @@
+id,filing,question,answer,row_label,label
+q01,TICKER_YYYY-MM-DD,What were [Company]'s total assets at the end of fiscal [year]?,[number exactly as printed],Total assets,table

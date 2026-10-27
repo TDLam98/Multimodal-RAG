@@ -4,8 +4,7 @@ Build tickers.txt: a reproducible random sample of S&P 500 companies.
     python make_ticker_list.py
         First run: samples N_COMPANIES companies and writes tickers.txt.
         Later runs: KEEPS the existing tickers.txt and only ADDS anything new in
-        MUST_INCLUDE. The list never silently changes once you and your teammate
-        have started downloading.
+        MUST_INCLUDE. 
 
     python make_ticker_list.py --resample
         Throws away tickers.txt and draws a fresh sample.
@@ -19,7 +18,8 @@ from pathlib import Path
 # ------------------------- CONFIG -------------------------------------
 N_COMPANIES = 130
 SEED = 42                      # same seed = same sample (for the same Wikipedia table)
-MUST_INCLUDE = ["AAPL"]        # companies with real pdfs on hand
+MUST_INCLUDE = ["AAPL", "ABT", "AMAT", "BKR", "DOV", "HON", "HPQ", "JPM", "KHC", "MCD",
+                "MDLZ", "MMM", "MU", "NEE", "PCAR", "RTX", "SYK", "TMO", "XEL", "XOM"]    # companies with real pdfs on hand
 USER_AGENT = "Tan-Dat Lam txl7064@mavs.uta.edu"
 # ----------------------------------------------------------------------
 

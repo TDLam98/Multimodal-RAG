@@ -1,5 +1,5 @@
 """
-Shared table handling for the HTML path and (later) the PDF path.
+Shared table handling for the HTML path and the PDF path.
 
 clean_cell():      tidy one cell of text
 clean_row():       tidy one table row (merge split "(" / ")" / "%" cells, drop blanks and "$")
