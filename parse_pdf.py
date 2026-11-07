@@ -13,10 +13,20 @@ Run (from the project folder):
     python parse_pdf.py --only naive                          # fast: do this for everything first
     python parse_pdf.py --only layout                         # slow: run overnight
     python parse_pdf.py --force                               # redo outputs that already exist
+    python parse_pdf.py --only layout --tickers real          # just the 20 real-PDF companies
+    python parse_pdf.py --only layout --tickers AAPL,MMM      # just these companies
     Other options: --scope table_pages|all    --strategy hi_res|fast
 
-Output: data/chunks/pdf_naive/<filing>.jsonl and data/chunks/pdf_layout/<filing>.jsonl
+    python parse_pdf.py --real                                # the company-published PDFs
+    python parse_pdf.py --real --only naive                   # (same options apply)
+
+Output: data/chunks/pdf_naive/ and data/chunks/pdf_layout/ (converted PDFs), or
+        data/chunks/real_naive/ and data/chunks/real_layout/ (with --real). One .jsonl per filing.
 Chunks use the same fields as parse_html.py, plus "page" (1-based).
+
+REAL PDFs (--real) are read from data/real_pdf/, which must hold TICKER_YYYY-MM-DD.pdf files whose
+names match an HTML filing exactly. They get their own source labels, real_naive and real_layout,
+so they never mix with the converted PDFs in the index.
 
 PAGE SCOPE (important for speed and for a fair comparison)
 Layout-aware parsing is slow, so by default BOTH methods only process the pages
@@ -35,8 +45,8 @@ import tempfile
 import time
 from pathlib import Path
 
-import pymupdf
 import pdfplumber
+import pymupdf
 from bs4 import BeautifulSoup
 
 from ingest import DATA_DIR
@@ -53,10 +63,18 @@ SKIP_CATEGORIES = {"Footer", "PageNumber", "Header"}   # Unstructured categories
 # ----------------------------------------------------------
 
 NUM_RE = re.compile(r"^\(?\$?\d[\d,]*\.?\d*\)?%?$")
-OUT_DIRS = {
-    "naive": DATA_DIR / "chunks" / "pdf_naive",
-    "layout": DATA_DIR / "chunks" / "pdf_layout",
+REAL_PDF_DIR = DATA_DIR / "real_pdf"
+SOURCE_NAMES = {   # kind of PDF -> method -> source label (also the chunk folder name)
+    "converted": {"naive": "pdf_naive", "layout": "pdf_layout"},
+    "real": {"naive": "real_naive", "layout": "real_layout"},
 }
+
+
+def out_dirs(kind="converted"):
+    return {m: DATA_DIR / "chunks" / src for m, src in SOURCE_NAMES[kind].items()}
+
+
+OUT_DIRS = out_dirs("converted")
 
 
 # ---------- step 1: scan every page quickly (PyMuPDF is fast) ----------
@@ -118,7 +136,7 @@ def pack_lines(text, limit=MAX_TEXT_CHARS):
     return pieces
 
 
-def naive_chunks(pdf_path, stem, pages, selected):
+def naive_chunks(pdf_path, stem, pages, selected, source="pdf_naive"):
     chunks = []
     with pdfplumber.open(str(pdf_path)) as pdf:
         for i in selected:
@@ -127,7 +145,7 @@ def naive_chunks(pdf_path, stem, pages, selected):
             getattr(page, "flush_cache", lambda: None)()      # keep memory flat
             for piece in pack_lines(text):
                 if len(piece) >= MIN_TEXT_CHARS:
-                    chunks.append({**base_meta(stem, "pdf_naive", pages[i]["section"], i + 1),
+                    chunks.append({**base_meta(stem, source, pages[i]["section"], i + 1),
                                    "text": piece})
     return number_chunks(chunks, stem)
 
@@ -163,7 +181,7 @@ def rows_from_html(html):
     return extract_rows(table) if table else []
 
 
-def layout_chunks(elements, stem, pages, page_map):
+def layout_chunks(elements, stem, pages, page_map, source="pdf_layout"):
     """Turn Unstructured elements into chunks (pure function, easy to test)."""
     chunks, buffer, buffer_page, last_title = [], [], None, ""
 
@@ -172,7 +190,7 @@ def layout_chunks(elements, stem, pages, page_map):
         if buffer:
             for piece in split_long(" ".join(buffer)):
                 if len(piece) >= MIN_TEXT_CHARS:
-                    chunks.append({**base_meta(stem, "pdf_layout",
+                    chunks.append({**base_meta(stem, source,
                                                pages[buffer_page]["section"], buffer_page + 1),
                                    "text": piece})
         buffer, buffer_page = [], None
@@ -194,7 +212,7 @@ def layout_chunks(elements, stem, pages, page_map):
             if rows and is_data_table(rows):
                 flush()
                 for group in group_rows(rows):
-                    chunks.append({**base_meta(stem, "pdf_layout", pages[page_idx]["section"],
+                    chunks.append({**base_meta(stem, source, pages[page_idx]["section"],
                                                page_idx + 1),
                                    "title": last_title,
                                    "text": serialize_table(group, last_title)})
@@ -213,7 +231,7 @@ def layout_chunks(elements, stem, pages, page_map):
 
 
 # ---------- orchestration ----------
-def process_filing(pdf_path, needs, scope, strategy):
+def process_filing(pdf_path, needs, scope, strategy, kind="converted"):
     """needs is a set containing 'naive' and/or 'layout'.
     Returns ({name: chunks}, info)."""
     stem = Path(pdf_path).stem
@@ -226,11 +244,13 @@ def process_filing(pdf_path, needs, scope, strategy):
 
     results = {}
     if "naive" in needs:
-        results["naive"] = naive_chunks(pdf_path, stem, pages, selected)
+        results["naive"] = naive_chunks(pdf_path, stem, pages, selected,
+                                        source=SOURCE_NAMES[kind]["naive"])
     if "layout" in needs:
         elements, used, page_map = run_unstructured(pdf_path, selected, strategy)
         info["strategy_used"] = used
-        results["layout"] = layout_chunks(elements, stem, pages, page_map)
+        results["layout"] = layout_chunks(elements, stem, pages, page_map,
+                                          source=SOURCE_NAMES[kind]["layout"])
     return results, info
 
 
@@ -263,53 +283,100 @@ def report(pdf_path, only, scope, strategy):
         print(f"\nUnstructured strategy used: {info['strategy_used']}")
 
 
-def run_manifest(only, scope, strategy, force, limit):
+def real_tickers():
+    return {p.stem.partition("_")[0].upper() for p in REAL_PDF_DIR.glob("*.pdf")}
+
+
+def parse_ticker_filter(spec):
+    """None, 'real' (the companies in data/real_pdf/), or a comma-separated list of tickers."""
+    if not spec:
+        return None
+    if spec.strip().lower() == "real":
+        tickers = real_tickers()
+        if not tickers:
+            raise SystemExit(f"--tickers real: no PDFs found in {REAL_PDF_DIR}")
+        return tickers
+    return {t.strip().upper() for t in spec.split(",") if t.strip()}
+
+
+def manifest_jobs():
     manifest = DATA_DIR / "manifest.csv"
     if not manifest.exists():
         raise FileNotFoundError(f"{manifest} not found; run ingest.py first")
-    for d in OUT_DIRS.values():
-        d.mkdir(parents=True, exist_ok=True)
-
     with open(manifest, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+    jobs = []
+    for row in rows:
+        stem = Path(str(row["html_path"]).replace("\\", "/")).stem
+        jobs.append((stem, DATA_DIR / "pdf" / f"{stem}.pdf"))
+    return jobs
+
+
+def real_jobs():
+    if not REAL_PDF_DIR.exists():
+        raise SystemExit(f"{REAL_PDF_DIR} not found. Put the company-published PDFs there.")
+    jobs = [(p.stem, p) for p in sorted(REAL_PDF_DIR.glob("*.pdf"))]
+    if not jobs:
+        raise SystemExit(f"No PDFs in {REAL_PDF_DIR}.")
+    html_dir = DATA_DIR / "html"
+    unmatched = [stem for stem, _ in jobs if not (html_dir / f"{stem}.html").exists()]
+    if unmatched:
+        print(f"WARNING: these real PDFs have no matching HTML filing, so their questions cannot be "
+              f"compared with the converted version. Check the names (TICKER_YYYY-MM-DD):\n  {unmatched}")
+    return jobs
+
+
+def run_jobs(jobs, kind, only, scope, strategy, force, limit, tickers=None):
+    dirs = out_dirs(kind)
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+    if tickers:
+        jobs = [(stem, p) for stem, p in jobs if stem.partition("_")[0].upper() in tickers]
+        missing = sorted(tickers - {stem.partition("_")[0].upper() for stem, _ in jobs})
+        if missing:
+            print(f"Not found among the filings: {missing}")
     if limit:
-        rows = rows[:limit]
+        jobs = jobs[:limit]
     names = [only] if only else ["naive", "layout"]
 
     failures, done, skipped = [], 0, 0
-    for i, row in enumerate(rows, 1):
-        stem = Path(str(row["html_path"]).replace("\\", "/")).stem
-        pdf_file = DATA_DIR / "pdf" / f"{stem}.pdf"
-        needs = {n for n in names if force or not (OUT_DIRS[n] / f"{stem}.jsonl").exists()}
+    for i, (stem, pdf_file) in enumerate(jobs, 1):
+        needs = {n for n in names if force or not (dirs[n] / f"{stem}.jsonl").exists()}
         if not needs:
             skipped += 1
             continue
         if not pdf_file.exists():
             failures.append({"file": stem, "error": "PDF missing; run convert.py"})
-            print(f"[{i}/{len(rows)}] {stem}: PDF missing")
+            print(f"[{i}/{len(jobs)}] {stem}: PDF missing")
             continue
 
         t0 = time.time()
         try:
-            results, info = process_filing(pdf_file, needs, scope, strategy)
+            results, info = process_filing(pdf_file, needs, scope, strategy, kind=kind)
             for name, chunks in results.items():
-                write_jsonl(OUT_DIRS[name] / f"{stem}.jsonl", chunks)
+                write_jsonl(dirs[name] / f"{stem}.jsonl", chunks)
             if info["selected"] == 0:
                 failures.append({"file": stem, "error": f"no pages selected (scope={scope})"})
+            if info["strategy_used"] == "fast" and strategy == "hi_res":
+                failures.append({"file": stem, "error": "hi_res failed; layout chunks used 'fast'"})
             done += 1
             counts = ", ".join(f"{n}={len(c)}" for n, c in results.items())
-            print(f"[{i}/{len(rows)}] {stem}: {info['selected']}/{info['total_pages']} pages, "
+            print(f"[{i}/{len(jobs)}] {stem}: {info['selected']}/{info['total_pages']} pages, "
                   f"{counts} chunks ({time.time() - t0:.0f}s)")
         except Exception as e:
             failures.append({"file": stem, "error": str(e)})
-            print(f"[{i}/{len(rows)}] {stem}: FAILED ({e})")
+            print(f"[{i}/{len(jobs)}] {stem}: FAILED ({e})")
 
-    with open(DATA_DIR / "parse_pdf_failures.csv", "w", newline="", encoding="utf-8") as f:
+    log = DATA_DIR / ("parse_real_pdf_failures.csv" if kind == "real" else "parse_pdf_failures.csv")
+    with open(log, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["file", "error"])
         writer.writeheader()
         writer.writerows(failures)
-    print(f"\nParsed {done}, skipped {skipped} already done, {len(failures)} problems "
-          f"(see parse_pdf_failures.csv).")
+    print(f"\nParsed {done}, skipped {skipped} already done, {len(failures)} problems (see {log.name}).")
+
+
+def run_manifest(only, scope, strategy, force, limit, tickers=None):
+    run_jobs(manifest_jobs(), "converted", only, scope, strategy, force, limit, tickers)
 
 
 if __name__ == "__main__":
@@ -319,9 +386,15 @@ if __name__ == "__main__":
     ap.add_argument("--scope", choices=["table_pages", "all"], default=PAGE_SCOPE)
     ap.add_argument("--strategy", choices=["hi_res", "fast"], default=UNSTRUCTURED_STRATEGY)
     ap.add_argument("--force", action="store_true", help="redo outputs that already exist")
-    ap.add_argument("--limit", type=int, help="only the first N filings in the manifest")
+    ap.add_argument("--limit", type=int, help="only the first N filings")
+    ap.add_argument("--tickers", help="'real' (the companies in data/real_pdf/) or a list like AAPL,MMM")
+    ap.add_argument("--real", action="store_true",
+                    help="parse the company-published PDFs in data/real_pdf/ instead of the converted ones")
     args = ap.parse_args()
+    tickers = parse_ticker_filter(args.tickers)
     if args.file:
         report(args.file, args.only, args.scope, args.strategy)
+    elif args.real:
+        run_jobs(real_jobs(), "real", args.only, args.scope, args.strategy, args.force, args.limit, tickers)
     else:
-        run_manifest(args.only, args.scope, args.strategy, args.force, args.limit)
+        run_manifest(args.only, args.scope, args.strategy, args.force, args.limit, tickers)

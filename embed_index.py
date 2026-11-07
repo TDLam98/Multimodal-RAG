@@ -21,6 +21,12 @@ What it does
      skips files that are already embedded, and re-embeds any file whose chunks changed.
   3. Joins everything into data/index/<model>/  (vectors.npy, chunks.jsonl, info.json)
 
+CHUNK HEADERS (CHUNK_HEADERS in the config, on by default): each chunk is embedded with a first line
+like "Apple Inc. (AAPL) | Form 10-K, fiscal year ended 2025-09-27 | Item 8 | CONSOLIDATED BALANCE SHEETS".
+The chunk files themselves are unchanged. Embeddings with headers live in their own folders (the model
+name ends in _hdr), so set CHUNK_HEADERS = False to go back to the earlier, header-less results; every
+other script follows this setting automatically.
+
 Searching is exact (one matrix product). That is fast enough for a few hundred thousand chunks
 and makes filtering by source, which is how the three retrieval configurations work, trivial.
 
@@ -46,15 +52,18 @@ import numpy as np
 from ingest import DATA_DIR
 
 # ------------------------- CONFIG -------------------------
-EMBED_PROVIDER = "openai"                  # "openai", "local" or "hash"
+EMBED_PROVIDER = "local"                   # "openai", "local" or "hash"
 OPENAI_MODEL = "text-embedding-3-small"
 LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 HASH_DIM = 512
 BATCH_SIZE = 128
 MAX_CHARS = 6000                           # longer chunks are truncated before embedding
-CHUNK_FOLDERS = ["html", "pdf_naive", "pdf_layout"]    # folders under data/chunks/
+CHUNK_FOLDERS = ["html", "pdf_naive", "pdf_layout", "real_naive", "real_layout"]  # under data/chunks/
 USD_PER_MILLION_TOKENS = 0.02              # list price for text-embedding-3-small; check current pricing
+CHUNK_HEADERS = True   # embed each chunk with a header naming its company, filing, section and table.
+                       # Without it, tables from different companies look almost identical to the
+                       # embedder, and naive PDF chunks win only because they keep printed page headers.
 # ----------------------------------------------------------
 
 # The three retrieval configurations from the proposal: each is just a set of sources to search.
@@ -62,14 +71,67 @@ CONFIGS = {
     "html_only": ["html_text", "html_table"],
     "html+naive_pdf": ["html_text", "html_table", "pdf_naive"],
     "html+layout_pdf": ["html_text", "html_table", "pdf_layout"],
+    # Robustness check on the company-published PDFs (only the 20 real-PDF companies have these):
+    "html+real_naive": ["html_text", "html_table", "real_naive"],
+    "html+real_layout": ["html_text", "html_table", "real_layout"],
 }
 
 _OPENAI_CLIENT = None
 _LOCAL_MODEL = None
 
 
+# ---------- chunk headers ----------
+_NAMES = None
+
+
+def company_name(ticker):
+    """Company name from data/company_names.json (written by rerank_data.py), else the ticker."""
+    global _NAMES
+    if _NAMES is None:
+        path = DATA_DIR / "company_names.json"
+        try:
+            _NAMES = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except ValueError:
+            _NAMES = {}
+        if not _NAMES:
+            try:
+                from ingest import sec_get
+                data = sec_get("https://www.sec.gov/files/company_tickers.json").json()
+                _NAMES = {r["ticker"].upper(): r["title"].strip() for r in data.values()}
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(_NAMES, indent=1), encoding="utf-8")
+            except Exception as e:
+                print(f"Could not fetch company names ({e}); chunk headers will use tickers.")
+                _NAMES = {}
+    name = _NAMES.get(ticker, "")
+    if name.isupper():
+        name = name.title()              # "EXXON MOBIL CORP" -> "Exxon Mobil Corp"
+    return f"{name} ({ticker})" if name else ticker
+
+
+def chunk_header(c):
+    """One line naming where the chunk comes from. Every source gets the same treatment."""
+    bits = [company_name(c.get("ticker", "")),
+            f"Form 10-K, fiscal year ended {c.get('report_date', '')}"]
+    if c.get("section"):
+        bits.append(c["section"])
+    if c.get("title"):
+        bits.append(c["title"][:150])
+    return " | ".join(bits)
+
+
+def text_for_embedding(c):
+    return f"{chunk_header(c)}\n{c['text']}" if CHUNK_HEADERS else c["text"]
+
+
 # ---------- embedding providers ----------
 def model_tag(provider):
+    """Folder name for this provider's embeddings and index. Headers get their own folders, so
+    embeddings with and without headers never mix and both can be kept for comparison."""
+    return _base_tag(provider) + ("_hdr" if CHUNK_HEADERS else "")
+
+
+def _base_tag(provider):
     if provider == "openai":
         return f"openai_{OPENAI_MODEL}"
     if provider == "local":
@@ -207,7 +269,7 @@ def embed_all(provider, limit=None, force=False):
     for n, (folder, stem, path) in enumerate(todo, 1):
         t0 = time.time()
         chunks = read_chunks(path)
-        vecs = embed_texts([c["text"] for c in chunks], provider)
+        vecs = embed_texts([text_for_embedding(c) for c in chunks], provider)
         out, meta = _paths(tag, folder, stem)
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".tmp")

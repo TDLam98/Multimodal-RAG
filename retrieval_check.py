@@ -42,10 +42,18 @@ def norm(s):
 
 
 def is_relevant(chunk, q):
-    if chunk["filing"] != q["filing"]:
+    # Same company, any of its filings: a 10-K's prior-year column repeats the previous
+    # filing's numbers, so a chunk from either filing is genuine evidence.
+    if chunk["ticker"] != q["filing"].partition("_")[0]:
         return False
     text = norm(chunk["text"])
-    if norm(q["answer"]) not in text:
+    answer = norm(q["answer"])
+    if re.fullmatch(r"\(?-?[\d.]+\)?", answer):
+        # Numbers must match whole: "1303" must not match inside "13030" or "21303".
+        core = re.escape(answer.strip("()-"))
+        if not re.search(rf"(?<![\d.]){core}(?!\.?\d)", text):
+            return False
+    elif answer not in text:
         return False
     label = norm(q.get("row_label", ""))
     return (not label) or label in text
@@ -57,23 +65,27 @@ def load_questions(path):
         missing = [c for c in REQUIRED if c not in (reader.fieldnames or [])]
         if missing:
             raise ValueError(f"{path} is missing columns: {missing}")
-        return [{k: (v or "").strip() for k, v in row.items()} for row in reader
+        rows = [{k: (v or "").strip() for k, v in row.items()} for row in reader
                 if (row.get("id") or "").strip()]
+    rejected = [r["id"] for r in rows if r.get("verified", "").lower() in {"n", "no", "wrong"}]
+    if rejected:
+        print(f"Skipping {len(rejected)} questions marked verified=n: {rejected}")
+    return [r for r in rows if r["id"] not in rejected]
 
 
 def evaluate(questions, idx, ks=KS):
     qvecs = ei.embed_texts([q["question"] for q in questions], idx.provider, is_query=True)
 
-    by_filing = {}
-    needed = {q["filing"] for q in questions}
+    by_ticker = {}                      # coverage looks at every filing of the company
+    needed = {q["filing"].partition("_")[0] for q in questions}
     for c in idx.chunks:
-        if c["filing"] in needed:
-            by_filing.setdefault(c["filing"], []).append(c)
+        if c["ticker"] in needed:
+            by_ticker.setdefault(c["ticker"], []).append(c)
     all_sources = sorted(set(idx.sources.tolist()))
 
     rows = []
     for q, qvec in zip(questions, qvecs):
-        coverage = {s: any(is_relevant(c, q) for c in by_filing[q["filing"]] if c["source"] == s)
+        coverage = {s: any(is_relevant(c, q) for c in by_ticker[q["filing"].partition("_")[0]] if c["source"] == s)
                     for s in all_sources}
         for config, sources in ei.CONFIGS.items():
             results = idx.search_vec(qvec, k=max(ks), sources=sources)
@@ -142,6 +154,12 @@ def run(questions_path, provider):
     if not kept:
         raise SystemExit("No usable questions. Filing names must match files in data/html.")
 
+    present = set(idx.sources.tolist())
+    for cfg, sources in ei.CONFIGS.items():
+        missing = [x for x in sources if x not in present and not x.startswith("html")]
+        if missing:
+            print(f"Note: no {', '.join(missing)} chunks in the index yet, "
+                  f"so {cfg} only searches the HTML chunks.")
     rows, all_sources = evaluate(kept, idx)
     summary = summarize(rows)
     print_summary(summary)
