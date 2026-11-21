@@ -54,7 +54,7 @@ OUT_DIR = ei.DATA_DIR / "generation"
 # Provider presets: (base URL, default model, environment variable holding the key)
 PROVIDERS = {
     "groq": ("https://api.groq.com/openai/v1", "llama-3.1-8b-instant", "GROQ_API_KEY"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash", "GEMINI_API_KEY"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash-lite", "GEMINI_API_KEY"),
     "openai": ("https://api.openai.com/v1", "gpt-4o-mini", "OPENAI_API_KEY"),
     "ollama": ("http://localhost:11434/v1", "llama3.1:8b", None),
     "mock": (None, "mock", None),

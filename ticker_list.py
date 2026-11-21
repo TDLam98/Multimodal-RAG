@@ -19,7 +19,7 @@ from pathlib import Path
 N_COMPANIES = 130
 SEED = 42                      # same seed = same sample (for the same Wikipedia table)
 MUST_INCLUDE = ["AAPL", "ABT", "AMAT", "BKR", "DOV", "HON", "HPQ", "JPM", "KHC", "MCD",
-                "MDLZ", "MMM", "MU", "NEE", "PCAR", "RTX", "SYK", "TMO", "XEL", "XOM"]    # companies with real pdfs on hand
+                "MDLZ", "MMM", "MU", "NEE", "PCAR", "RTX", "SYK", "TMO", "XEL", "ZBRA"]    # companies with real pdfs on hand
 USER_AGENT = "Tan-Dat Lam txl7064@mavs.uta.edu"
 # ----------------------------------------------------------------------
 
